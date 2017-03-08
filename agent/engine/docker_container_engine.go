@@ -32,6 +32,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/engine/emptyvolume"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/cihub/seelog"
+	"github.com/prometheus/client_golang/prometheus"
 
 	docker "github.com/fsouza/go-dockerclient"
 )
@@ -64,6 +65,16 @@ const (
 	// StatsInactivityTimeout controls the amount of time we hold open a
 	// connection to the Docker daemon waiting for stats data
 	StatsInactivityTimeout = 5 * time.Second
+)
+
+var (
+	dockerClientLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "docker_client_latency_seconds",
+			Help: "Histogram for the latency of docker client calls to docker remote api",
+		},
+		[]string{"method_name"},
+	)
 )
 
 // DockerClient interface to make testing it easier
@@ -146,6 +157,8 @@ func NewDockerGoClient(clientFactory dockerclient.Factory, cfg *config.Config) (
 		return nil, err
 	}
 
+	prometheus.MustRegister(dockerClientLatency)
+
 	return &dockerGoClient{
 		clientFactory:    clientFactory,
 		auth:             dockerauth.NewDockerAuthProvider(cfg.EngineAuthType, cfg.EngineAuthData.Contents()),
@@ -171,6 +184,9 @@ func (dg *dockerGoClient) time() ttime.Time {
 }
 
 func (dg *dockerGoClient) PullImage(image string, authData *api.RegistryAuthenticationData) DockerContainerMetadata {
+	timer := dg.newTimer("PullImage")
+	defer timer.ObserveDuration()
+
 	timeout := dg.time().After(pullImageTimeout)
 
 	response := make(chan DockerContainerMetadata, 1)
@@ -345,6 +361,9 @@ func (dg *dockerGoClient) CreateContainer(config *docker.Config, hostConfig *doc
 	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
 	defer cancel()
 
+	timer := dg.newTimer("CreateContainer")
+	defer timer.ObserveDuration()
+
 	// Buffered channel so in the case of timeout it takes one write, never gets
 	// read, and can still be GC'd
 	response := make(chan DockerContainerMetadata, 1)
@@ -395,6 +414,9 @@ func (dg *dockerGoClient) StartContainer(id string, timeout time.Duration) Docke
 	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
 	defer cancel()
 
+	timer := dg.newTimer("StartContainer")
+	defer timer.ObserveDuration()
+
 	// Buffered channel so in the case of timeout it takes one write, never gets
 	// read, and can still be GC'd
 	response := make(chan DockerContainerMetadata, 1)
@@ -436,6 +458,9 @@ func dockerStateToState(state docker.State) api.ContainerStatus {
 }
 
 func (dg *dockerGoClient) DescribeContainer(dockerID string) (api.ContainerStatus, DockerContainerMetadata) {
+	timer := dg.newTimer("DescribeContainer")
+	defer timer.ObserveDuration()
+
 	dockerContainer, err := dg.InspectContainer(dockerID, inspectContainerTimeout)
 	if err != nil {
 		return api.ContainerStatusNone, DockerContainerMetadata{Error: CannotDescribeContainerError{err}}
@@ -455,6 +480,9 @@ func (dg *dockerGoClient) InspectContainer(dockerID string, timeout time.Duratio
 	// instead of TODO.
 	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
 	defer cancel()
+
+	timer := dg.newTimer("InspectContainer")
+	defer timer.ObserveDuration()
 
 	// Buffered channel so in the case of timeout it takes one write, never gets
 	// read, and can still be GC'd
@@ -498,6 +526,9 @@ func (dg *dockerGoClient) StopContainer(dockerID string, timeout time.Duration) 
 	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
 	defer cancel()
 
+	timer := dg.newTimer("StopTimer")
+	defer timer.ObserveDuration()
+
 	// Buffered channel so in the case of timeout it takes one write, never gets
 	// read, and can still be GC'd
 	response := make(chan DockerContainerMetadata, 1)
@@ -539,6 +570,9 @@ func (dg *dockerGoClient) RemoveContainer(dockerID string, timeout time.Duration
 	// easier to write tests
 	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
 	defer cancel()
+
+	timer := dg.newTimer("RemoveContainer")
+	defer timer.ObserveDuration()
 
 	// Buffered channel so in the case of timeout it takes one write, never gets
 	// read, and can still be GC'd
@@ -738,6 +772,9 @@ func (dg *dockerGoClient) ListContainers(all bool, timeout time.Duration) ListCo
 	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
 	defer cancel()
 
+	timer := dg.newTimer("ListContainers")
+	defer timer.ObserveDuration()
+
 	// Buffered channel so in the case of timeout it takes one write, never gets
 	// read, and can still be GC'd
 	response := make(chan ListContainersResponse, 1)
@@ -826,6 +863,9 @@ func (dg *dockerGoClient) RemoveImage(imageName string, imageRemovalTimeout time
 	ctx, cancel := context.WithTimeout(context.Background(), imageRemovalTimeout)
 	defer cancel()
 
+	timer := dg.newTimer("RemoveImage")
+	defer timer.ObserveDuration()
+
 	response := make(chan error, 1)
 	go func() { response <- dg.removeImage(imageName) }()
 	select {
@@ -842,4 +882,10 @@ func (dg *dockerGoClient) removeImage(imageName string) error {
 		return err
 	}
 	return client.RemoveImage(imageName)
+}
+
+func (dg *dockerGoClient) newTimer(methodName string) *prometheus.Timer {
+	return prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
+		dockerClientLatency.WithLabelValues(methodName).Observe(v)
+	}))
 }

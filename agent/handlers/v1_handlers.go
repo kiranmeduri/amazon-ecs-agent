@@ -28,6 +28,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/logger"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/agent/version"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var log = logger.ForModule("Handlers")
@@ -182,6 +183,7 @@ func setupServer(containerInstanceArn *string, taskEngine DockerStateResolver, c
 
 	serverMux := http.NewServeMux()
 	serverMux.HandleFunc("/", defaultHandler)
+	serverMux.Handle("/metrics", promhttp.Handler())
 	for key, fn := range serverFunctions {
 		serverMux.HandleFunc(key, fn)
 	}

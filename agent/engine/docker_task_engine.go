@@ -33,6 +33,7 @@ import (
 	utilsync "github.com/aws/amazon-ecs-agent/agent/utils/sync"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	"github.com/cihub/seelog"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -44,6 +45,16 @@ const (
 	capabilityTaskIAMRole        = "task-iam-role"
 	capabilityTaskIAMRoleNetHost = "task-iam-role-network-host"
 	labelPrefix                  = "com.amazonaws.ecs."
+)
+
+var (
+	dockerTaskEngineLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "ecs_agent_docker_task_engine_latency_seconds",
+			Help: "Histogram for the latency of ecs-agent's docker_task_engine operations",
+		},
+		[]string{"method_name"},
+	)
 )
 
 // DockerTaskEngine is an abstraction over the DockerGoClient so that
@@ -138,6 +149,9 @@ func (engine *DockerTaskEngine) MarshalJSON() ([]byte, error) {
 // and operate normally.
 // This function must be called before any other function, except serializing and deserializing, can succeed without error.
 func (engine *DockerTaskEngine) Init() error {
+
+	prometheus.MustRegister(dockerTaskEngineLatency)
+
 	// TODO, pass in a a context from main from background so that other things can stop us, not just the tests
 	ctx, cancel := context.WithCancel(context.TODO())
 	engine.stopEngine = cancel
@@ -264,6 +278,10 @@ func (engine *DockerTaskEngine) synchronizeState() {
 // CheckTaskState inspects the state of all containers within a task and writes
 // their state to the managed task's container channel.
 func (engine *DockerTaskEngine) CheckTaskState(task *api.Task) {
+
+	timer := engine.newTimer("CheckTaskState")
+	defer timer.ObserveDuration()
+
 	taskContainers, ok := engine.state.ContainerMapByArn(task.Arn)
 	if !ok {
 		log.Warn("Could not check task state for task; no task in state", "task", task)
@@ -440,6 +458,10 @@ func (engine *DockerTaskEngine) TaskEvents() (<-chan api.TaskStateChange, <-chan
 
 // AddTask starts tracking a task
 func (engine *DockerTaskEngine) AddTask(task *api.Task) error {
+
+	timer := engine.newTimer("AddTask")
+	defer timer.ObserveDuration()
+
 	task.PostUnmarshalTask(engine.credentialsManager)
 
 	engine.processTasks.Lock()
@@ -464,11 +486,17 @@ func tryApplyTransition(task *api.Task, container *api.Container, to api.Contain
 
 // ListTasks returns the tasks currently managed by the DockerTaskEngine
 func (engine *DockerTaskEngine) ListTasks() ([]*api.Task, error) {
+	timer := engine.newTimer("ListTasks")
+	defer timer.ObserveDuration()
+
 	return engine.state.AllTasks(), nil
 }
 
 // GetTaskByArn returns the task identified by that ARN
 func (engine *DockerTaskEngine) GetTaskByArn(arn string) (*api.Task, bool) {
+	timer := engine.newTimer("GetTasksByArn")
+	defer timer.ObserveDuration()
+
 	return engine.state.TaskByArn(arn)
 }
 
@@ -815,4 +843,10 @@ func (engine *DockerTaskEngine) isParallelPullCompatible() bool {
 	}
 
 	return false
+}
+
+func (engine *DockerTaskEngine) newTimer(methodName string) *prometheus.Timer {
+	return prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
+		dockerTaskEngineLatency.WithLabelValues(methodName).Observe(v)
+	}))
 }
